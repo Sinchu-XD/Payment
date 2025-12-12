@@ -7,7 +7,7 @@ VENV="$BASE_DIR/venv"
 WEBHOOK_LOG="$BASE_DIR/webhook.log"
 CLOUD_LOG="$BASE_DIR/cloudflared.log"
 BOT_LOG="$BASE_DIR/bot.log"
-ENV_FILE="$BASE_DIR/paymentbot.env"   # or use .env if you prefer
+ENV_FILE="$BASE_DIR/rzp.env"# or use .env if you prefer
 CLOUDFLARED_CMD="cloudflared tunnel --url http://localhost:8000"
 
 # === helper ===
