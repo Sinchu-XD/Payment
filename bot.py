@@ -128,7 +128,6 @@ async def owner_flow(client, message):
         return
 
 
-# Customer clicked on item button
 @app.on_callback_query(filters.regex(r"^buy_(\d+)$"))
 async def buy_item(client, callback_query):
     item_id = int(callback_query.data.split("_")[1])
@@ -140,7 +139,7 @@ async def buy_item(client, callback_query):
     _id, button_name, content_type, file_id, url, price = item
 
     user = callback_query.from_user
-    amount = price  # already in paise
+    amount = price  # paise already
 
     # Razorpay payment link create
     payment_link = razorpay_client.payment_link.create({
@@ -149,27 +148,58 @@ async def buy_item(client, callback_query):
         "description": button_name,
         "customer": {
             "name": user.first_name or "",
-            "email": "test@example.com"  # agar email log karna ho to pehle user se pooch sakte ho
+            "email": "test@example.com"
         },
         "notify": {
             "sms": False,
             "email": False
         },
-        "callback_url": WEBHOOK_PUBLIC_URL,  # optional - but we'll use webhook mainly
-        "callback_method": "get",
         "notes": {
             "telegram_user_id": str(user.id),
             "item_id": str(item_id)
         }
     })
 
-    await callback_query.message.reply_text(
-        f"Payment Details:\n\nItem: {button_name}\nAmount: ₹{amount // 100}\n\n"
-        f"Payment link: {payment_link['short_url']}\n\n"
-        "Payment hone ke baad aapko yahi pe content mil jayega ✅"
-    )
+    short_url = payment_link["short_url"]
+
+    # Razorpay auto QR
+    qr_image_url = payment_link.get("accept_multiple_payments", None)
+    
+    # Razorpay QR is actually inside: payment_link["id"] → GET request required
+    link_id = payment_link["id"]
+    link_data = razorpay_client.payment_link.fetch(link_id)
+
+    # Razorpay returns QR as "image" inside "payment" → base64 PNG
+    qr_base64 = link_data.get("qr", {}).get("image", None)
+
+    if qr_base64:
+        import base64
+        qr_bytes = base64.b64decode(qr_base64)
+
+        # Save temporary QR file
+        qr_file = "payment_qr.png"
+        with open(qr_file, "wb") as f:
+            f.write(qr_bytes)
+
+        # Send Payment QR + Link
+        await callback_query.message.reply_photo(
+            qr_file,
+            caption=(
+                f"💵 *Payment Required*\n\n"
+                f"Item: *{button_name}*\n"
+                f"Amount: ₹{amount//100}\n\n"
+                f"🔗 Payment Link:\n{short_url}\n\n"
+                f"📌 You can pay using Payment Link or QR."
+            )
+        )
+    else:
+        # Fallback: only link
+        await callback_query.message.reply_text(
+            f"Payment Link (QR unavailable):\n{short_url}"
+        )
 
     await callback_query.answer()
+
     
 
 async def main():
