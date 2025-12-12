@@ -202,14 +202,14 @@ async def buy_item(client, callback_query):
 
     
 
-async def main():
-    init_db()
-    await app.start()
-    print("Bot started...")
-    await idle()
-
-from pyrogram import idle
-
 if __name__ == "__main__":
-    asyncio.run(main())
-  
+    init_db()
+    try:
+        app.start()
+        print("Bot started...")
+        idle()  # blocks until SIGINT/SIGTERM
+    except KeyboardInterrupt:
+        pass
+    finally:
+        app.stop()
+        print("Bot stopped.")
