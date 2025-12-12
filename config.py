@@ -12,7 +12,9 @@ RAZORPAY_KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET")
 RAZORPAY_WEBHOOK_SECRET = os.getenv("RAZORPAY_WEBHOOK_SECRET")
 
 # Owner ka Telegram ID (int)
-OWNER_ID = int(os.getenv("OWNER_ID"))
+OWNER_ID = list(
+    map(int, os.getenv("OWNER_ID", "").split(","))
+)
 
 # Webhook server URL (jahan Flask chalega – Razorpay ye URL pe call karega)
 WEBHOOK_PUBLIC_URL = os.getenv("WEBHOOK_PUBLIC_URL")
