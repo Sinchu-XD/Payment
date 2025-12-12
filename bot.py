@@ -1,10 +1,13 @@
-import asyncio
+import os
+import base64
+import requests
+from requests.auth import HTTPBasicAuth
+
 import razorpay
 from pyrogram import idle
 from pyrogram import Client, filters
-from pyrogram.types import (
-    InlineKeyboardMarkup, InlineKeyboardButton
-)
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
 from config import (
     API_ID, API_HASH, BOT_TOKEN,
     RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET,
@@ -12,14 +15,12 @@ from config import (
 )
 from database import init_db, add_item, get_all_items, get_item
 
-# States temporary memory
+# temp memory
 user_state = {}
 temp_data = {}
 
 app = Client("payment-bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
-
 razorpay_client = razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET))
-
 
 @app.on_message(filters.command("start"))
 async def start_handler(client, message):
@@ -28,7 +29,6 @@ async def start_handler(client, message):
         await message.reply_text("Filhaal koi item available nahi hai.")
         return
 
-    # Inline buttons banao
     buttons = []
     for item_id, button_name, price in items:
         buttons.append([
@@ -43,15 +43,12 @@ async def start_handler(client, message):
         reply_markup=InlineKeyboardMarkup(buttons)
     )
 
-
-# Only owner can add items
+# Owner-only add
 @app.on_message(filters.command("add") & filters.user(OWNER_ID))
 async def add_item_command(client, message):
     user_state[message.from_user.id] = "ASK_TYPE"
     temp_data[message.from_user.id] = {}
-    await message.reply_text("Kya add karna hai? `video` ya `link` likho.",
-                             quote=True)
-
+    await message.reply_text("Kya add karna hai? `video` ya `link` likho.", quote=True)
 
 @app.on_message(filters.user(OWNER_ID))
 async def owner_flow(client, message):
@@ -61,7 +58,6 @@ async def owner_flow(client, message):
 
     state = user_state[uid]
 
-    # Step 1: Ask type
     if state == "ASK_TYPE":
         text = (message.text or "").strip().lower()
         if text not in ["video", "link"]:
@@ -69,14 +65,12 @@ async def owner_flow(client, message):
             return
         temp_data[uid]["type"] = text
         user_state[uid] = "ASK_CONTENT"
-
         if text == "video":
             await message.reply_text("Ab wo video bhejo jo sell karni hai.")
         else:
             await message.reply_text("Ab wo URL bhejo jo sell karni hai.")
         return
 
-    # Step 2: Content
     if state == "ASK_CONTENT":
         ctype = temp_data[uid]["type"]
         if ctype == "video":
@@ -96,14 +90,12 @@ async def owner_flow(client, message):
         await message.reply_text("Button ka naam kya rakhe? (jaise: Video 1)")
         return
 
-    # Step 3: Button name
     if state == "ASK_BUTTON_NAME":
         temp_data[uid]["button_name"] = message.text.strip()
         user_state[uid] = "ASK_PRICE"
         await message.reply_text("Price kitna rakhe? (₹ me number likho, jaise 299)")
         return
 
-    # Step 4: Price
     if state == "ASK_PRICE":
         try:
             price = int(message.text.strip())
@@ -128,7 +120,6 @@ async def owner_flow(client, message):
         temp_data.pop(uid, None)
         return
 
-
 @app.on_callback_query(filters.regex(r"^buy_(\d+)$"))
 async def buy_item(client, callback_query):
     item_id = int(callback_query.data.split("_")[1])
@@ -138,70 +129,142 @@ async def buy_item(client, callback_query):
         return
 
     _id, button_name, content_type, file_id, url, price = item
-
     user = callback_query.from_user
-    amount = price  # paise already
+    amount = price  # paise expected
 
-    # Razorpay payment link create
-    payment_link = razorpay_client.payment_link.create({
-        "amount": amount,
-        "currency": "INR",
-        "description": button_name,
-        "customer": {
-            "name": user.first_name or "",
-            "email": "test@example.com"
-        },
-        "notify": {
-            "sms": False,
-            "email": False
-        },
-        "notes": {
-            "telegram_user_id": str(user.id),
-            "item_id": str(item_id)
-        }
-    })
+    # 1) Create payment link
+    try:
+        payment_link = razorpay_client.payment_link.create({
+            "amount": amount,
+            "currency": "INR",
+            "description": button_name,
+            "customer": {
+                "name": user.first_name or "",
+                # If possible, use a real email/phone for better UX:
+                "email": "test@example.com"
+            },
+            "notify": {"sms": False, "email": False},
+            "notes": {"telegram_user_id": str(user.id), "item_id": str(item_id)}
+        })
+    except Exception as e:
+        print("ERROR creating payment link:", e)
+        await callback_query.message.reply_text("Payment link banaate waqt error aaya. Thodi der me try karo.")
+        await callback_query.answer()
+        return
 
-    short_url = payment_link["short_url"]
+    print("DEBUG payment_link:", payment_link)
 
-    # Razorpay auto QR
-    qr_image_url = payment_link.get("accept_multiple_payments", None)
-    
-    # Razorpay QR is actually inside: payment_link["id"] → GET request required
-    link_id = payment_link["id"]
-    link_data = razorpay_client.payment_link.fetch(link_id)
+    link_id = payment_link.get("id")
+    short_url = payment_link.get("short_url") or payment_link.get("shortlink") or payment_link.get("shortLink")
 
-    # Razorpay returns QR as "image" inside "payment" → base64 PNG
-    qr_base64 = link_data.get("qr", {}).get("image", None)
+    if not link_id or not short_url:
+        # If response missing, show full response for debugging and abort
+        print("Payment link missing id/short_url. Full response:", payment_link)
+        await callback_query.message.reply_text("Payment link create nahi hua. Contact admin.")
+        await callback_query.answer()
+        return
 
-    if qr_base64:
-        import base64
-        qr_bytes = base64.b64decode(qr_base64)
+    # 2) Try to fetch detailed link data (may contain qr info)
+    try:
+        link_data = razorpay_client.payment_link.fetch(link_id)
+    except Exception as e:
+        print("WARN unable to fetch payment_link details:", e)
+        link_data = {}
 
-        # Save temporary QR file
-        qr_file = "payment_qr.png"
-        with open(qr_file, "wb") as f:
-            f.write(qr_bytes)
+    print("DEBUG link_data:", link_data)
 
-        # Send Payment QR + Link
-        await callback_query.message.reply_photo(
-            qr_file,
-            caption=(
-                f"💵 *Payment Required*\n\n"
-                f"Item: *{button_name}*\n"
-                f"Amount: ₹{amount//100}\n\n"
-                f"🔗 Payment Link:\n{short_url}\n\n"
-                f"📌 You can pay using Payment Link or QR."
+    # 3) Try to get QR from link_data (some accounts don't have this)
+    qr_base64 = None
+    # multiple possible locations
+    if isinstance(link_data, dict):
+        qr_base64 = link_data.get("qr", {}).get("image") or link_data.get("image") or link_data.get("qr_image") or None
+
+    # 4) If no QR in link_data, attempt Razorpay QR API (v1/payments/qr_codes)
+    qr_file_path = None
+    if not qr_base64:
+        try:
+            qr_payload = {
+                "type": "upi_qr",            # use upi_qr or omit depending on your need
+                "name": f"Payment for {button_name}",
+                "usage": "single_use",
+                "fixed_amount": True,
+                "amount": amount,
+                "currency": "INR",
+                "notes": {"link_id": link_id, "item_id": str(item_id)}
+            }
+            resp = requests.post(
+                "https://api.razorpay.com/v1/payments/qr_codes",
+                auth=HTTPBasicAuth(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET),
+                json=qr_payload,
+                timeout=15
             )
-        )
+            print("DEBUG qr_api status:", resp.status_code, resp.text[:1000])
+            if resp.status_code in (200, 201):
+                qr_json = resp.json()
+                # image may be present as 'image' (base64) or 'image_content' or an URL in 'short_url'
+                qr_base64 = qr_json.get("image") or qr_json.get("image_content") or None
+                qr_url = qr_json.get("short_url") or qr_json.get("url") or qr_json.get("qr_url")
+                # if image_content is a URL, use that directly
+                if qr_base64 and qr_base64.startswith("http"):
+                    qr_file_path = None
+                    qr_remote_url = qr_base64
+                elif qr_base64:
+                    qr_bytes = base64.b64decode(qr_base64)
+                    qr_file_path = f"payment_qr_{link_id}.png"
+                    with open(qr_file_path, "wb") as f:
+                        f.write(qr_bytes)
+                elif qr_url:
+                    # QR API returned a URL
+                    qr_file_path = None
+                    qr_remote_url = qr_url
+                else:
+                    qr_file_path = None
+        except Exception as e:
+            print("WARN QR API failed:", e)
+
     else:
-        # Fallback: only link
-        await callback_query.message.reply_text(
-            f"Payment Link (QR unavailable):\n{short_url}"
-        )
+        # We already have base64 from link_data
+        try:
+            qr_bytes = base64.b64decode(qr_base64)
+            qr_file_path = f"payment_qr_{link_id}.png"
+            with open(qr_file_path, "wb") as f:
+                f.write(qr_bytes)
+        except Exception as e:
+            print("WARN could not decode qr_base64:", e)
+            qr_file_path = None
+
+    # 5) Send to user: prefer local file, then remote URL, then fallback to short_url
+    caption_text = (
+        f"💵 *Payment Required*\n\n"
+        f"Item: *{button_name}*\n"
+        f"Amount: ₹{amount//100}\n\n"
+        f"🔗 Payment Link:\n{short_url}\n\n"
+        f"📌 You can pay using Payment Link or QR."
+    )
+
+    try:
+        if qr_file_path and os.path.exists(qr_file_path):
+            # send local file
+            with open(qr_file_path, "rb") as photo:
+                await callback_query.message.reply_photo(photo, caption=caption_text)
+            # remove temporary file
+            try:
+                os.remove(qr_file_path)
+            except:
+                pass
+        else:
+            # if qr_remote_url available, try it
+            qr_remote_url = locals().get("qr_remote_url", None)
+            if qr_remote_url:
+                await callback_query.message.reply_photo(qr_remote_url, caption=caption_text)
+            else:
+                # final fallback: just send short link
+                await callback_query.message.reply_text(f"Payment Link (QR unavailable):\n{short_url}")
+    except Exception as e:
+        print("ERROR sending payment info:", e)
+        await callback_query.message.reply_text(f"Payment Link:\n{short_url}")
 
     await callback_query.answer()
-
-    
 
 if __name__ == "__main__":
     init_db()
